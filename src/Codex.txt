@@ -1,0 +1,72 @@
+#!/bin/bash
+set -euo pipefail
+
+# .NET SDK install for automation/Codex/CI
+# - Installs to ~/.dotnet (no apt repo required)
+# - Ensures dotnet is available immediately in THIS process
+# - Persists PATH for future shells via /etc/profile.d/dotnet.sh (best for non-interactive shells)
+# - Optionally runs a quick xUnit test
+
+DOTNET_CHANNEL="10.0"                 # STS channel for .NET 10
+DOTNET_QUALITY="ga"                   # stable (change to preview/daily if you want)
+INSTALL_DIR="${HOME}/.dotnet"
+DOTNET_INSTALL_SCRIPT="dotnet-install.sh"
+DOTNET_INSTALL_URL="https://dot.net/v1/dotnet-install.sh"
+
+RUN_DOTNET_TEST=true                  # set false to skip test project
+PROFILED_FILE="/etc/profile.d/dotnet.sh"
+
+echo "🚧 Installing .NET SDK ${DOTNET_CHANNEL} (${DOTNET_QUALITY}) into ${INSTALL_DIR}"
+
+# Step 1: Install prerequisites
+sudo apt-get update -y
+sudo apt-get install -y wget curl unzip ca-certificates
+
+# Step 2: Download dotnet-install.sh (always refresh to avoid stale copies)
+curl -fsSL "$DOTNET_INSTALL_URL" -o "$DOTNET_INSTALL_SCRIPT"
+chmod +x "$DOTNET_INSTALL_SCRIPT"
+
+# Step 3: Install SDK
+# --no-path: we manage PATH ourselves (better for automation)
+./"$DOTNET_INSTALL_SCRIPT" \
+  --channel "$DOTNET_CHANNEL" \
+  --quality "$DOTNET_QUALITY" \
+  --install-dir "$INSTALL_DIR" \
+  --no-path
+
+# Step 4: Export for current shell session (so dotnet works immediately)
+export DOTNET_ROOT="$INSTALL_DIR"
+export PATH="$DOTNET_ROOT:$PATH"
+hash -r
+
+# Step 5: Persist environment for future shells (works well for Codex/CI/non-interactive)
+# This creates /etc/profile.d/dotnet.sh which is sourced by many shell startup flows.
+# It sets DOTNET_ROOT + PATH for the current user at runtime (via $HOME).
+sudo tee "$PROFILED_FILE" > /dev/null <<'EOF'
+# .NET SDK (user-local) environment
+export DOTNET_ROOT="$HOME/.dotnet"
+export PATH="$HOME/.dotnet:$PATH"
+EOF
+
+# Step 6: Verify install
+echo "✅ dotnet path: $(command -v dotnet || true)"
+echo "✅ .NET SDK version:"
+dotnet --version
+
+# Step 7: Optional test validation
+if [ "$RUN_DOTNET_TEST" = true ]; then
+  echo "🧪 Running temporary test project..."
+  TMP_DIR="$(mktemp -d)"
+  pushd "$TMP_DIR" > /dev/null
+
+  dotnet new xunit -n SampleTests > /dev/null
+  pushd SampleTests > /dev/null
+  dotnet test
+  popd > /dev/null
+
+  popd > /dev/null
+  rm -rf "$TMP_DIR"
+  echo "✅ Test project ran successfully"
+fi
+
+echo "🎉 .NET SDK ${DOTNET_CHANNEL} setup complete"
