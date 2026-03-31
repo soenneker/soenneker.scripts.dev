@@ -1,177 +1,346 @@
 <#
 .SYNOPSIS
-Adds developer-friendly Microsoft Defender exclusions for Visual Studio, .NET, NuGet, Node, and common dev roots.
+    Applies Microsoft Defender exclusions for a Windows .NET / Visual Studio dev box.
 
-.NOTES
-- Run as Administrator.
-- Uses Add-MpPreference and only appends missing items.
-- You can remove later via Remove-MpPreference (same params).
+.DESCRIPTION
+    Adds common high-value exclusions for Visual Studio, .NET, NuGet, and transient
+    repo build directories under a configured git root.
 
-.PARAMETER WhatIf
-Provided automatically when SupportsShouldProcess is enabled. Use -WhatIf to preview changes.
+    Safer defaults:
+    - No blanket exclusion of the entire git root
+    - No PowerShell / Python / git process exclusions by default
+    - Only adds missing exclusions
 #>
 
-[CmdletBinding(SupportsShouldProcess)]
-param()  # no custom WhatIf here
+# ── SETTINGS ────────────────────────────────────────────────────────
 
-function Assert-Admin {
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $isAdmin) { throw "This script must be run as Administrator." }
+$GitRoot = 'C:\git'   # Change if needed
+
+# Main exclusions
+$IncludeVisualStudio       = $true
+$IncludeDotNet             = $true
+$IncludeNode               = $false
+$IncludeNgrok              = $false
+
+# Repo handling
+$ExcludeRepoTransientDirs  = $true   # bin / obj / .vs / packages / node_modules\.cache under $GitRoot
+$ExcludeGitRoot            = $false  # broad exclusion; usually leave false
+
+# Optional aggressive process exclusions
+$ExcludeGitProcess         = $false
+$ExcludePythonProcess      = $false
+$ExcludePowerShellProcess  = $false
+
+# ───────────────────────────────────────────────────────────────────
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+function Log {
+    param([string]$Message)
+    Write-Host "[$((Get-Date).ToString('HH:mm:ss'))] $Message"
 }
 
-function Add-ExclusionItems {
-    [CmdletBinding(SupportsShouldProcess)]
+function Assert-Admin {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Run this script as Administrator.'
+    }
+}
+
+function Get-DefenderPreferences {
+    try {
+        return Get-MpPreference
+    }
+    catch {
+        throw "Unable to access Microsoft Defender preferences. $($_.Exception.Message)"
+    }
+}
+
+function Add-UniqueStrings {
+    param(
+        [Parameter(Mandatory)][System.Collections.Generic.HashSet[string]]$Set,
+        [Parameter(Mandatory)][string[]]$Values
+    )
+
+    foreach ($value in $Values) {
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            [void]$Set.Add($value)
+        }
+    }
+}
+
+function Get-ExistingPaths {
+    param([Parameter(Mandatory)][string[]]$Candidates)
+
+    $result = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($candidate in $Candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+
+        if (Test-Path -LiteralPath $candidate) {
+            $result.Add([System.IO.Path]::GetFullPath($candidate))
+        }
+    }
+
+    return $result.ToArray()
+}
+
+function Get-RepoTransientDirectories {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $result = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    if ([string]::IsNullOrWhiteSpace($Root) -or -not (Test-Path -LiteralPath $Root)) {
+        return $result.ToArray()
+    }
+
+    Log "Scanning transient repo directories under $Root..."
+
+    try {
+        $dirs = Get-ChildItem -LiteralPath $Root -Directory -Recurse -Force -ErrorAction SilentlyContinue
+
+        foreach ($dir in $dirs) {
+            switch -Regex ($dir.Name) {
+                '^\.vs$' {
+                    [void]$result.Add($dir.FullName)
+                    continue
+                }
+
+                '^bin$' {
+                    [void]$result.Add($dir.FullName)
+                    continue
+                }
+
+                '^obj$' {
+                    [void]$result.Add($dir.FullName)
+                    continue
+                }
+
+                '^packages$' {
+                    [void]$result.Add($dir.FullName)
+                    continue
+                }
+
+                '^\.cache$' {
+                    if ($null -ne $dir.Parent -and $dir.Parent.Name -eq 'node_modules') {
+                        [void]$result.Add($dir.FullName)
+                    }
+
+                    continue
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning "Failed scanning '$Root': $($_.Exception.Message)"
+    }
+
+    return $result.ToArray()
+}
+
+function Apply-DefenderExclusions {
     param(
         [string[]]$Paths = @(),
         [string[]]$Processes = @(),
         [string[]]$Extensions = @()
     )
 
-    try {
-        $pref = Get-MpPreference
-    } catch {
-        throw "Unable to read Defender preferences. Are Microsoft Defender features installed/enabled? $_"
+    $pref = Get-DefenderPreferences
+
+    $existingPaths = @($pref.ExclusionPath)
+    $existingProcesses = @($pref.ExclusionProcess)
+    $existingExtensions = @($pref.ExclusionExtension)
+
+    $pathsToAdd = @(
+        $Paths |
+        Where-Object { $_ -and -not ($existingPaths -icontains $_) } |
+        Sort-Object -Unique
+    )
+
+    $processesToAdd = @(
+        $Processes |
+        Where-Object { $_ -and -not ($existingProcesses -icontains $_) } |
+        Sort-Object -Unique
+    )
+
+    $extensionsToAdd = @(
+        $Extensions |
+        Where-Object { $_ -and -not ($existingExtensions -icontains $_) } |
+        Sort-Object -Unique
+    )
+
+    if ($pathsToAdd.Count -gt 0) {
+        Log "Adding $($pathsToAdd.Count) Defender path exclusion(s)..."
+        Add-MpPreference -ExclusionPath $pathsToAdd
+    }
+    else {
+        Log 'No new path exclusions needed.'
     }
 
-    $existingPaths      = @($pref.ExclusionPath)      + @()
-    $existingProcesses  = @($pref.ExclusionProcess)   + @()
-    $existingExtensions = @($pref.ExclusionExtension) + @()
-
-    $toAddPaths      = $Paths      | Where-Object { $_ -and -not ($existingPaths -icontains $_) }
-    $toAddProcesses  = $Processes  | Where-Object { $_ -and -not ($existingProcesses -icontains $_) }
-    $toAddExtensions = $Extensions | Where-Object { $_ -and -not ($existingExtensions -icontains $_) }
-
-    if ($toAddPaths.Count -gt 0) {
-        foreach ($p in $toAddPaths) {
-            if ($PSCmdlet.ShouldProcess($p, "Add to Defender ExclusionPath")) {
-                Add-MpPreference -ExclusionPath $p
-            }
-        }
+    if ($processesToAdd.Count -gt 0) {
+        Log "Adding $($processesToAdd.Count) Defender process exclusion(s)..."
+        Add-MpPreference -ExclusionProcess $processesToAdd
+    }
+    else {
+        Log 'No new process exclusions needed.'
     }
 
-    if ($toAddProcesses.Count -gt 0) {
-        foreach ($proc in $toAddProcesses) {
-            if ($PSCmdlet.ShouldProcess($proc, "Add to Defender ExclusionProcess")) {
-                Add-MpPreference -ExclusionProcess $proc
-            }
-        }
+    if ($extensionsToAdd.Count -gt 0) {
+        Log "Adding $($extensionsToAdd.Count) Defender extension exclusion(s)..."
+        Add-MpPreference -ExclusionExtension $extensionsToAdd
+    }
+    else {
+        Log 'No new extension exclusions needed.'
     }
 
-    if ($toAddExtensions.Count -gt 0) {
-        foreach ($ext in $toAddExtensions) {
-            if ($PSCmdlet.ShouldProcess($ext, "Add to Defender ExclusionExtension")) {
-                Add-MpPreference -ExclusionExtension $ext
-            }
-        }
-    }
+    $after = Get-DefenderPreferences
 
-    $after = Get-MpPreference
-    $pathsCount = @($after.ExclusionPath).Count
-    $procCount  = @($after.ExclusionProcess).Count
-    $extCount   = @($after.ExclusionExtension).Count
-
-    Write-Host "Done. Current exclusion counts => Paths: $pathsCount, Processes: $procCount, Extensions: $extCount" -ForegroundColor Green
+    Write-Host ''
+    Write-Host 'Done.' -ForegroundColor Green
+    Write-Host "  Paths:      $(@($after.ExclusionPath).Count)"
+    Write-Host "  Processes:  $(@($after.ExclusionProcess).Count)"
+    Write-Host "  Extensions: $(@($after.ExclusionExtension).Count)"
 }
 
 Assert-Admin
 
-# ---------- Build EXCLUSIONS ----------
-# IMPORTANT: Initialize $paths BEFORE any += operations
-$paths = @()
+$pathSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$processSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$extensionSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-# Resolve common dev roots if present (only add existing)
-$devRoots = @(
-    "C:\git"
-) | Where-Object { Test-Path $_ }
+# ── VISUAL STUDIO / BUILD ──────────────────────────────────────────
 
-# Visual Studio + build tooling + caches
-$vsPaths = @(
-    "$env:ProgramFiles\Microsoft Visual Studio",
-    "$env:ProgramFiles(x86)\Microsoft Visual Studio",
-    "$env:ProgramFiles\MSBuild",
-    "$env:ProgramData\Microsoft\VisualStudio\Packages",      # VS installer cache
-    "$env:LOCALAPPDATA\Microsoft\VisualStudio",
-    "$env:LOCALAPPDATA\Temp\VS",
-    "$env:LOCALAPPDATA\Temp\VisualStudio",
-    "$env:LOCALAPPDATA\Temp\MsBuild",
-    "$env:TEMP\VS",
-    "$env:TEMP\MsBuild"
-) | Where-Object { $_ -and (Test-Path $_) }
+if ($IncludeVisualStudio) {
+    Add-UniqueStrings -Set $pathSet -Values (Get-ExistingPaths -Candidates @(
+        "$env:ProgramFiles\Microsoft Visual Studio",
+        "$env:ProgramFiles(x86)\Microsoft Visual Studio",
+        "$env:ProgramFiles\MSBuild",
+        "$env:ProgramData\Microsoft\VisualStudio\Packages",
+        "$env:LOCALAPPDATA\Microsoft\VisualStudio",
+        "$env:LOCALAPPDATA\Temp\VS",
+        "$env:LOCALAPPDATA\Temp\VisualStudio",
+        "$env:LOCALAPPDATA\Temp\MsBuild",
+        "$env:TEMP\VS",
+        "$env:TEMP\MsBuild"
+    ))
 
-# .NET / NuGet
-$dotnetNugetPaths = @(
-    "$env:ProgramFiles\dotnet",
-    "$env:USERPROFILE\.dotnet",
-    "$env:USERPROFILE\.nuget\packages",
-    "$env:LOCALAPPDATA\NuGet\Cache",
-    "$env:APPDATA\NuGet\Cache",
-    "$env:TEMP\nuget"
-) | Where-Object { Test-Path $_ }
-
-# Node ecosystem (optional but commonly helpful)
-$nodePaths = @(
-    "$env:APPDATA\npm",
-    "$env:LOCALAPPDATA\npm-cache",
-    "$env:USERPROFILE\AppData\Local\Yarn",
-    "$env:LOCALAPPDATA\pnpm-store"
-) | Where-Object { Test-Path $_ }
-
-# Add ngrok paths (Chocolatey-specific; only if present)
-$ngrokPaths = @(
-    "$env:ProgramData\chocolatey\lib\ngrok",            # package root
-    "$env:ProgramData\chocolatey\lib\ngrok\tools",      # ngrok.exe lives here
-    "$env:ProgramData\chocolatey\bin"                   # shim
-) | Where-Object { Test-Path $_ }
-
-# Combine all path candidates (Defender allows non-existing, but we keep it clean)
-$paths += $devRoots
-$paths += $vsPaths
-$paths += $dotnetNugetPaths
-$paths += $nodePaths
-$paths += $ngrokPaths
-
-# Also add per-dev-root transient heavy dirs if present
-foreach ($root in $devRoots) {
-    foreach ($sub in @(".vs","bin","obj","packages","node_modules\.cache")) {
-        $p = Join-Path $root $sub
-        if (Test-Path $p) { $paths += $p }
-    }
+    Add-UniqueStrings -Set $processSet -Values @(
+        'devenv.exe',
+        'MSBuild.exe',
+        'VBCSCompiler.exe',
+        'ServiceHub.RoslynCodeAnalysisService.exe'
+    )
 }
 
-$paths = $paths | Sort-Object -Unique
+# ── .NET / NUGET ───────────────────────────────────────────────────
 
-# Minimal extension exclusions
-$extensions = @(".nupkg", ".snupkg")
+if ($IncludeDotNet) {
+    Add-UniqueStrings -Set $pathSet -Values (Get-ExistingPaths -Candidates @(
+        "$env:ProgramFiles\dotnet",
+        "$env:USERPROFILE\.dotnet",
+        "$env:USERPROFILE\.nuget\packages",
+        "$env:LOCALAPPDATA\NuGet\Cache",
+        "$env:APPDATA\NuGet\Cache",
+        "$env:LOCALAPPDATA\NuGet\v3-cache",
+        "$env:LOCALAPPDATA\NuGet\plugins-cache",
+        "$env:TEMP\nuget",
+        "$env:TEMP\NuGetScratch"
+    ))
 
-# Common processes used in builds/dev loops (include ngrok)
-$processes = @(
-    "devenv.exe",
-    "MSBuild.exe",
-    "VBCSCompiler.exe",
-    "ServiceHub.RoslynCodeAnalysisService.exe",
-    "dotnet.exe",
-    "git.exe",
-    "pwsh.exe",
-    "powershell.exe",
-    "node.exe",
-    "npm.exe",
-    "npx.exe",
-    "pnpm.exe",
-    "bun.exe",
-    "deno.exe",
-    "tsc.exe",
-    "gulp.exe",
-    "esbuild.exe",
-    "webpack.exe",
-    "python.exe",
-    "ngrok.exe"
-)
+    Add-UniqueStrings -Set $processSet -Values @(
+        'dotnet.exe'
+    )
 
-# Apply
-Add-ExclusionItems -Paths $paths -Processes $processes -Extensions $extensions
+    Add-UniqueStrings -Set $extensionSet -Values @(
+        '.nupkg',
+        '.snupkg'
+    )
+}
+
+# ── NODE ───────────────────────────────────────────────────────────
+
+if ($IncludeNode) {
+    Add-UniqueStrings -Set $pathSet -Values (Get-ExistingPaths -Candidates @(
+        "$env:APPDATA\npm",
+        "$env:LOCALAPPDATA\npm-cache",
+        "$env:USERPROFILE\AppData\Local\Yarn",
+        "$env:LOCALAPPDATA\pnpm-store"
+    ))
+
+    Add-UniqueStrings -Set $processSet -Values @(
+        'node.exe',
+        'npm.exe',
+        'npx.exe',
+        'pnpm.exe',
+        'bun.exe',
+        'deno.exe',
+        'tsc.exe',
+        'gulp.exe',
+        'esbuild.exe',
+        'webpack.exe'
+    )
+}
+
+# ── NGROK ──────────────────────────────────────────────────────────
+
+if ($IncludeNgrok) {
+    Add-UniqueStrings -Set $pathSet -Values (Get-ExistingPaths -Candidates @(
+        "$env:ProgramData\chocolatey\lib\ngrok",
+        "$env:ProgramData\chocolatey\lib\ngrok\tools",
+        "$env:ProgramData\chocolatey\bin"
+    ))
+
+    Add-UniqueStrings -Set $processSet -Values @(
+        'ngrok.exe'
+    )
+}
+
+# ── REPO PATHS ─────────────────────────────────────────────────────
+
+if ($ExcludeGitRoot -and (Test-Path -LiteralPath $GitRoot)) {
+    Add-UniqueStrings -Set $pathSet -Values @([System.IO.Path]::GetFullPath($GitRoot))
+}
+
+if ($ExcludeRepoTransientDirs) {
+    Add-UniqueStrings -Set $pathSet -Values (Get-RepoTransientDirectories -Root $GitRoot)
+}
+
+# ── OPTIONAL AGGRESSIVE PROCESSES ──────────────────────────────────
+
+if ($ExcludeGitProcess) {
+    Add-UniqueStrings -Set $processSet -Values @('git.exe')
+}
+
+if ($ExcludePythonProcess) {
+    Add-UniqueStrings -Set $processSet -Values @('python.exe')
+}
+
+if ($ExcludePowerShellProcess) {
+    Add-UniqueStrings -Set $processSet -Values @('pwsh.exe', 'powershell.exe')
+}
+
+# ── APPLY ──────────────────────────────────────────────────────────
+
+$paths = @($pathSet | Sort-Object)
+$processes = @($processSet | Sort-Object)
+$extensions = @($extensionSet | Sort-Object)
+
+Write-Host ''
+Write-Host 'Prepared exclusions:' -ForegroundColor Cyan
+Write-Host "  Paths:      $($paths.Count)"
+Write-Host "  Processes:  $($processes.Count)"
+Write-Host "  Extensions: $($extensions.Count)"
+Write-Host ''
+
+Apply-DefenderExclusions -Paths $paths -Processes $processes -Extensions $extensions
 
 Write-Warning @"
-Review: Exclusions improve build/test throughput but reduce scanning on these targets.
-If you maintain untrusted repos, consider limiting dev-root exclusions.
-Remove with: Remove-MpPreference -ExclusionPath ... / -ExclusionProcess ... / -ExclusionExtension ...
+Exclusions improve build throughput but reduce scanning on those targets.
+This script intentionally avoids broad exclusions unless you explicitly enable them at the top.
 "@
