@@ -3,13 +3,14 @@
     Applies Microsoft Defender exclusions for a Windows .NET / Visual Studio dev box.
 
 .DESCRIPTION
-    Adds common high-value exclusions for Visual Studio, .NET, NuGet, and transient
-    repo build directories under a configured git root.
+    Adds common high-value exclusions for Visual Studio, .NET, NuGet, test output,
+    and transient repo build directories under a configured git root.
 
     Safer defaults:
     - No blanket exclusion of the entire git root
     - No PowerShell / Python / git process exclusions by default
     - Only adds missing exclusions
+    - Uses repo wildcard exclusions so future build folders are covered too
 #>
 
 # ── SETTINGS ────────────────────────────────────────────────────────
@@ -19,11 +20,19 @@ $GitRoot = 'C:\git'   # Change if needed
 # Main exclusions
 $IncludeVisualStudio       = $true
 $IncludeDotNet             = $true
+$IncludeJetBrains          = $true
 $IncludeNode               = $false
 $IncludeNgrok              = $false
 
+# Additional dev/build exclusions
+$IncludeTestArtifacts      = $true
+$IncludeArtifactsDir       = $true
+$IncludeNuGetExe           = $true
+$IncludeDotnetWatch        = $false
+$IncludeTestProcesses      = $true
+
 # Repo handling
-$ExcludeRepoTransientDirs  = $true   # bin / obj / .vs / packages / node_modules\.cache under $GitRoot
+$ExcludeRepoTransientDirs  = $true   # bin / obj / .vs / packages / node_modules\.cache / TestResults / artifacts under $GitRoot
 $ExcludeGitRoot            = $false  # broad exclusion; usually leave false
 
 # Optional aggressive process exclusions
@@ -62,11 +71,11 @@ function Get-DefenderPreferences {
 
 function Add-UniqueStrings {
     param(
-        [Parameter(Mandatory)][System.Collections.Generic.HashSet[string]]$Set,
-        [Parameter(Mandatory)][string[]]$Values
+        [Parameter(Mandatory)]$Set,
+        [AllowEmptyCollection()][string[]]$Values = @()
     )
 
-    foreach ($value in $Values) {
+    foreach ($value in @($Values)) {
         if (-not [string]::IsNullOrWhiteSpace($value)) {
             [void]$Set.Add($value)
         }
@@ -76,72 +85,19 @@ function Add-UniqueStrings {
 function Get-ExistingPaths {
     param([Parameter(Mandatory)][string[]]$Candidates)
 
-    $result = [System.Collections.Generic.List[string]]::new()
+    $result = @()
 
-    foreach ($candidate in $Candidates) {
+    foreach ($candidate in @($Candidates)) {
         if ([string]::IsNullOrWhiteSpace($candidate)) {
             continue
         }
 
         if (Test-Path -LiteralPath $candidate) {
-            $result.Add([System.IO.Path]::GetFullPath($candidate))
+            $result += [System.IO.Path]::GetFullPath($candidate)
         }
     }
 
-    return $result.ToArray()
-}
-
-function Get-RepoTransientDirectories {
-    param([Parameter(Mandatory)][string]$Root)
-
-    $result = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-    if ([string]::IsNullOrWhiteSpace($Root) -or -not (Test-Path -LiteralPath $Root)) {
-        return $result.ToArray()
-    }
-
-    Log "Scanning transient repo directories under $Root..."
-
-    try {
-        $dirs = Get-ChildItem -LiteralPath $Root -Directory -Recurse -Force -ErrorAction SilentlyContinue
-
-        foreach ($dir in $dirs) {
-            switch -Regex ($dir.Name) {
-                '^\.vs$' {
-                    [void]$result.Add($dir.FullName)
-                    continue
-                }
-
-                '^bin$' {
-                    [void]$result.Add($dir.FullName)
-                    continue
-                }
-
-                '^obj$' {
-                    [void]$result.Add($dir.FullName)
-                    continue
-                }
-
-                '^packages$' {
-                    [void]$result.Add($dir.FullName)
-                    continue
-                }
-
-                '^\.cache$' {
-                    if ($null -ne $dir.Parent -and $dir.Parent.Name -eq 'node_modules') {
-                        [void]$result.Add($dir.FullName)
-                    }
-
-                    continue
-                }
-            }
-        }
-    }
-    catch {
-        Write-Warning "Failed scanning '$Root': $($_.Exception.Message)"
-    }
-
-    return $result.ToArray()
+    return @($result)
 }
 
 function Apply-DefenderExclusions {
@@ -159,19 +115,19 @@ function Apply-DefenderExclusions {
 
     $pathsToAdd = @(
         $Paths |
-        Where-Object { $_ -and -not ($existingPaths -icontains $_) } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not ($existingPaths -icontains $_) } |
         Sort-Object -Unique
     )
 
     $processesToAdd = @(
         $Processes |
-        Where-Object { $_ -and -not ($existingProcesses -icontains $_) } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not ($existingProcesses -icontains $_) } |
         Sort-Object -Unique
     )
 
     $extensionsToAdd = @(
         $Extensions |
-        Where-Object { $_ -and -not ($existingExtensions -icontains $_) } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not ($existingExtensions -icontains $_) } |
         Sort-Object -Unique
     )
 
@@ -234,7 +190,30 @@ if ($IncludeVisualStudio) {
         'devenv.exe',
         'MSBuild.exe',
         'VBCSCompiler.exe',
-        'ServiceHub.RoslynCodeAnalysisService.exe'
+        'csc.exe',
+        'ServiceHub.RoslynCodeAnalysisService.exe',
+        'ServiceHub.Host.dotnet.x64.exe',
+        'ServiceHub.Host.netfx.x86.exe'
+    )
+}
+
+if ($IncludeJetBrains) {
+    Add-UniqueStrings -Set $pathSet -Values (Get-ExistingPaths -Candidates @(
+        "$env:LOCALAPPDATA\JetBrains\Transient",
+        "$env:LOCALAPPDATA\JetBrains\Shared\vAny\Caches",
+        "$env:LOCALAPPDATA\JetBrains\ReSharperPlatformVs*\Cache"
+    ))
+
+    Add-UniqueStrings -Set $pathSet -Values @(
+        "$GitRoot\*\.idea",
+        "$GitRoot\*\*\.idea",
+        "$GitRoot\*\*\*\.idea"
+    )
+
+    Add-UniqueStrings -Set $processSet -Values @(
+        'JetBrains.ReSharper.Host.exe',
+        'JetBrains.ReSharper.Worker.exe',
+        'jb.dotnet.processhost.exe'
     )
 }
 
@@ -250,16 +229,39 @@ if ($IncludeDotNet) {
         "$env:LOCALAPPDATA\NuGet\v3-cache",
         "$env:LOCALAPPDATA\NuGet\plugins-cache",
         "$env:TEMP\nuget",
-        "$env:TEMP\NuGetScratch"
+        "$env:TEMP\NuGetScratch",
+        "$env:USERPROFILE\.templateengine",
+        "$env:LOCALAPPDATA\Temp\dotnet"
     ))
 
     Add-UniqueStrings -Set $processSet -Values @(
         'dotnet.exe'
     )
 
+    if ($IncludeNuGetExe) {
+        Add-UniqueStrings -Set $processSet -Values @(
+            'nuget.exe'
+        )
+    }
+
+    if ($IncludeDotnetWatch) {
+        Add-UniqueStrings -Set $processSet -Values @(
+            'dotnet-watch.exe'
+        )
+    }
+
     Add-UniqueStrings -Set $extensionSet -Values @(
         '.nupkg',
         '.snupkg'
+    )
+}
+
+# ── TESTING ────────────────────────────────────────────────────────
+
+if ($IncludeTestProcesses) {
+    Add-UniqueStrings -Set $processSet -Values @(
+        'testhost.exe',
+        'vstest.console.exe'
     )
 }
 
@@ -270,7 +272,9 @@ if ($IncludeNode) {
         "$env:APPDATA\npm",
         "$env:LOCALAPPDATA\npm-cache",
         "$env:USERPROFILE\AppData\Local\Yarn",
-        "$env:LOCALAPPDATA\pnpm-store"
+        "$env:LOCALAPPDATA\Yarn\Cache",
+        "$env:LOCALAPPDATA\pnpm-store",
+        "$env:LOCALAPPDATA\Temp\esbuild"
     ))
 
     Add-UniqueStrings -Set $processSet -Values @(
@@ -283,7 +287,10 @@ if ($IncludeNode) {
         'tsc.exe',
         'gulp.exe',
         'esbuild.exe',
-        'webpack.exe'
+        'webpack.exe',
+        'rollup.exe',
+        'vite.exe',
+        'vite.cmd'
     )
 }
 
@@ -307,8 +314,47 @@ if ($ExcludeGitRoot -and (Test-Path -LiteralPath $GitRoot)) {
     Add-UniqueStrings -Set $pathSet -Values @([System.IO.Path]::GetFullPath($GitRoot))
 }
 
-if ($ExcludeRepoTransientDirs) {
-    Add-UniqueStrings -Set $pathSet -Values (Get-RepoTransientDirectories -Root $GitRoot)
+if ($ExcludeRepoTransientDirs -and -not [string]::IsNullOrWhiteSpace($GitRoot)) {
+    Add-UniqueStrings -Set $pathSet -Values @(
+        "$GitRoot\*\bin",
+        "$GitRoot\*\obj",
+        "$GitRoot\*\.vs",
+        "$GitRoot\*\packages",
+        "$GitRoot\*\node_modules\.cache",
+
+        "$GitRoot\*\*\bin",
+        "$GitRoot\*\*\obj",
+        "$GitRoot\*\*\packages",
+        "$GitRoot\*\*\node_modules\.cache",
+
+        "$GitRoot\*\*\*\bin",
+        "$GitRoot\*\*\*\obj",
+        "$GitRoot\*\*\*\packages",
+        "$GitRoot\*\*\*\node_modules\.cache",
+
+        "$GitRoot\*\*\*\*\bin",
+        "$GitRoot\*\*\*\*\obj",
+        "$GitRoot\*\*\*\*\packages",
+        "$GitRoot\*\*\*\*\node_modules\.cache"
+    )
+
+    if ($IncludeTestArtifacts) {
+        Add-UniqueStrings -Set $pathSet -Values @(
+            "$GitRoot\*\TestResults",
+            "$GitRoot\*\*\TestResults",
+            "$GitRoot\*\*\*\TestResults",
+            "$GitRoot\*\*\*\*\TestResults"
+        )
+    }
+
+    if ($IncludeArtifactsDir) {
+        Add-UniqueStrings -Set $pathSet -Values @(
+            "$GitRoot\*\artifacts",
+            "$GitRoot\*\*\artifacts",
+            "$GitRoot\*\*\*\artifacts",
+            "$GitRoot\*\*\*\*\artifacts"
+        )
+    }
 }
 
 # ── OPTIONAL AGGRESSIVE PROCESSES ──────────────────────────────────
