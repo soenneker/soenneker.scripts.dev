@@ -23,6 +23,7 @@ $IncludeDotNet             = $true
 $IncludeJetBrains          = $true
 $IncludeNode               = $false
 $IncludeNgrok              = $false
+$IncludeCursor             = $true
 
 # Additional dev/build exclusions
 $IncludeTestArtifacts      = $true
@@ -33,7 +34,7 @@ $IncludeTestProcesses      = $true
 
 # Repo handling
 $ExcludeRepoTransientDirs  = $true   # bin / obj / .vs / packages / node_modules\.cache / TestResults / artifacts under $GitRoot
-$ExcludeGitRoot            = $false  # broad exclusion; usually leave false
+$ExcludeGitRoot            = $true
 
 # Optional aggressive process exclusions
 $ExcludeGitProcess         = $false
@@ -186,15 +187,23 @@ if ($IncludeVisualStudio) {
         "$env:TEMP\MsBuild"
     ))
 
-    Add-UniqueStrings -Set $processSet -Values @(
-        'devenv.exe',
-        'MSBuild.exe',
-        'VBCSCompiler.exe',
-        'csc.exe',
-        'ServiceHub.RoslynCodeAnalysisService.exe',
-        'ServiceHub.Host.dotnet.x64.exe',
-        'ServiceHub.Host.netfx.x86.exe'
-    )
+	Add-UniqueStrings -Set $processSet -Values @(
+		'devenv.exe',
+		'MSBuild.exe',
+		'VBCSCompiler.exe',
+		'csc.exe',
+
+		# Roslyn / ServiceHub
+		'ServiceHub.RoslynCodeAnalysisService.exe',
+		'ServiceHub.Host.dotnet.x64.exe',
+		'ServiceHub.Host.netfx.x86.exe',
+		'Microsoft.ServiceHub.Controller.exe',
+		'ServiceHub.IndexingService.exe',
+
+		# Compiler server variants (sometimes used)
+		'compiler.server.exe',
+		'CompilerServer.exe'
+	)
 }
 
 if ($IncludeJetBrains) {
@@ -259,10 +268,39 @@ if ($IncludeDotNet) {
 # ── TESTING ────────────────────────────────────────────────────────
 
 if ($IncludeTestProcesses) {
-    Add-UniqueStrings -Set $processSet -Values @(
-        'testhost.exe',
-        'vstest.console.exe'
+	Add-UniqueStrings -Set $processSet -Values @(
+		'testhost.exe',
+		'testhost.net.exe',
+		'vstest.console.exe',
+		'vstest.executionengine.exe'
+	)
+}
+
+# ── CURSOR ─────────────────────────────────────────────────────────
+
+if ($IncludeCursor) {
+    Add-UniqueStrings -Set $pathSet -Values (Get-ExistingPaths -Candidates @(
+        "$env:LOCALAPPDATA\Programs\Cursor",
+        "$env:APPDATA\Cursor",
+        "$env:LOCALAPPDATA\Cursor",
+        "$env:LOCALAPPDATA\cursor-updater",
+        "$env:USERPROFILE\.cursor"
+    ))
+
+    Add-UniqueStrings -Set $pathSet -Values @(
+        "$GitRoot\*\.cursor",
+        "$GitRoot\*\*\.cursor",
+        "$GitRoot\*\*\*\.cursor",
+        "$GitRoot\*\*\*\*\.cursor"
     )
+
+	Add-UniqueStrings -Set $processSet -Values @(
+		'Cursor.exe',
+		'Cursor Helper.exe',
+		'cursor-updater.exe',
+		'Code.exe',
+		'Code Helper.exe'
+	)
 }
 
 # ── NODE ───────────────────────────────────────────────────────────
