@@ -300,7 +300,14 @@ if ($StopAllDotnetProcesses) {
 
 if ($WipeRepoArtifacts) {
     Invoke-Safe "Cleaning repo artifacts under $GitRoot..." {
-        Remove-MatchingDirsUnder -Root $GitRoot -Patterns @('bin', 'obj', '.vs', '_ReSharper*')
+    Remove-MatchingDirsUnder -Root $GitRoot -Patterns @(
+        'bin',
+        'obj',
+        '.vs',
+        '_ReSharper*',
+        'TestResults*',
+        'node_modules'
+    )
     }
 }
 
