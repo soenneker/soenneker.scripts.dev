@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    One-stop cleanup for a Windows .NET / Visual Studio dev box.
+    One-stop cleanup for a Windows .NET / Visual Studio / Rider / Codex dev box.
 
 .DESCRIPTION
     Recursively removes common build artifacts under a git root, clears optional IDE/tool caches,
@@ -32,6 +32,10 @@ $WipeVsCaches           = $true
 $WipeDeepVsCaches       = $false  # more aggressive VS cache wipe
 $WipeVsCodeCaches       = $true
 $WipeCursorCaches       = $true
+$WipeRiderCaches        = $true
+$WipeRiderSettings      = $false  # nuclear; removes Rider user settings/config
+$WipeCodexCaches        = $true
+$WipeCodexHome          = $false  # nuclear; removes ~/.codex auth/config/session state
 $WipeReSharperCaches    = $true
 
 # Mobile / MAUI / Android
@@ -48,6 +52,9 @@ $WipeDevCerts           = $false  # dotnet dev-certs https --clean / --trust
 $StopVisualStudio       = $true
 $StopVsCode             = $true
 $StopCursor             = $true
+$StopRider              = $true
+$StopCodex              = $true
+$StopDevHub             = $true
 $StopBuildProcesses     = $true
 $StopAllDotnetProcesses = $false  # aggressive; usually leave false
 
@@ -267,6 +274,34 @@ if ($StopCursor) {
     }
 }
 
+if ($StopRider) {
+    Invoke-Safe "Stopping JetBrains Rider..." {
+        foreach ($name in @('rider64', 'rider')) {
+            Stop-App -Name $name
+        }
+    }
+}
+
+if ($StopCodex) {
+    Invoke-Safe "Stopping Codex Windows app..." {
+        foreach ($name in @(
+            'Codex',
+            'codex',
+            'codex-command-runner',
+            'codex-windows-sandbox-setup',
+            'node_repl'
+        )) {
+            Stop-App -Name $name
+        }
+    }
+}
+
+if ($StopDevHub) {
+    Invoke-Safe "Stopping DevHub..." {
+        Stop-App -Name 'DevHub'
+    }
+}
+
 if ($StopVisualStudio) {
     Invoke-Safe "Stopping Visual Studio..." {
         Stop-App -Name 'devenv'
@@ -305,6 +340,7 @@ if ($WipeRepoArtifacts) {
         'obj',
         '.vs',
         '_ReSharper*',
+        '.idea',
         'TestResults*',
         'node_modules'
     )
@@ -512,6 +548,120 @@ if ($WipeReSharperCaches) {
         }
     }
 }
+
+
+# ── RIDER ───────────────────────────────────────────────────────────
+
+if ($WipeRiderCaches) {
+    Invoke-Safe "Cleaning Rider caches..." {
+        $jetBrainsLocal = Join-Path $env:LOCALAPPDATA 'JetBrains'
+
+        if (Test-Path -LiteralPath $jetBrainsLocal) {
+            Get-ChildItem -Path $jetBrainsLocal -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'Rider*' } |
+                ForEach-Object {
+                    foreach ($subdir in @(
+                        'caches',
+                        'system',
+                        'tmp',
+                        'log'
+                    )) {
+                        $path = Join-Path $_.FullName $subdir
+                        if (Test-Path -LiteralPath $path) {
+                            Remove-DirectoryRobust -Path $path
+                        }
+                    }
+                }
+
+            $transient = Join-Path $jetBrainsLocal 'Transient'
+            if (Test-Path -LiteralPath $transient) {
+                Get-ChildItem -Path $transient -Directory -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -like 'Rider*' -or $_.Name -like 'ReSharper*' } |
+                    ForEach-Object {
+                        Remove-DirectoryRobust -Path $_.FullName
+                    }
+            }
+        }
+
+        $jetBrainsRoaming = Join-Path $env:APPDATA 'JetBrains'
+        if (Test-Path -LiteralPath $jetBrainsRoaming) {
+            Get-ChildItem -Path $jetBrainsRoaming -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'Rider*' } |
+                ForEach-Object {
+                    foreach ($subdir in @(
+                        'caches',
+                        'log',
+                        'tmp'
+                    )) {
+                        $path = Join-Path $_.FullName $subdir
+                        if (Test-Path -LiteralPath $path) {
+                            Remove-DirectoryRobust -Path $path
+                        }
+                    }
+                }
+        }
+    }
+}
+
+if ($WipeRiderSettings) {
+    Invoke-Safe "Wiping Rider settings..." {
+        $jetBrainsRoaming = Join-Path $env:APPDATA 'JetBrains'
+        if (Test-Path -LiteralPath $jetBrainsRoaming) {
+            Get-ChildItem -Path $jetBrainsRoaming -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'Rider*' } |
+                ForEach-Object {
+                    Remove-DirectoryRobust -Path $_.FullName
+                }
+        }
+    }
+}
+
+# ── CODEX WINDOWS APP ───────────────────────────────────────────────
+
+if ($WipeCodexCaches) {
+    Invoke-Safe "Cleaning Codex Windows app caches..." {
+        $paths = @(
+            (Join-Path $env:APPDATA 'Codex'),
+            (Join-Path $env:LOCALAPPDATA 'Codex'),
+            (Join-Path $env:LOCALAPPDATA 'OpenAI\Codex'),
+            (Join-Path $env:TEMP 'codex')
+        )
+
+        foreach ($path in $paths) {
+            if (Test-Path -LiteralPath $path) {
+                Remove-DirectoryRobust -Path $path
+            }
+        }
+
+        $packagesRoot = Join-Path $env:LOCALAPPDATA 'Packages'
+        if (Test-Path -LiteralPath $packagesRoot) {
+            Get-ChildItem -Path $packagesRoot -Directory -Filter 'OpenAI.Codex*' -Force -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    foreach ($relative in @(
+                        'LocalCache\Local\OpenAI\Codex',
+                        'LocalCache\Roaming\Codex',
+                        'TempState',
+                        'AC\Temp'
+                    )) {
+                        $path = Join-Path $_.FullName $relative
+                        if (Test-Path -LiteralPath $path) {
+                            Remove-DirectoryRobust -Path $path
+                        }
+                    }
+                }
+        }
+    }
+}
+
+if ($WipeCodexHome) {
+    Invoke-Safe "Wiping Codex home state..." {
+        $codexHome = Join-Path $env:USERPROFILE '.codex'
+        if (Test-Path -LiteralPath $codexHome) {
+            Remove-DirectoryRobust -Path $codexHome
+        }
+    }
+}
+
 
 # ── VS CODE ─────────────────────────────────────────────────────────
 
