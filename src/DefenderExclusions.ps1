@@ -34,7 +34,7 @@ $IncludeTestProcesses      = $true
 
 # Repo handling
 $ExcludeRepoTransientDirs  = $true   # bin / obj / .vs / packages / node_modules\.cache / TestResults / artifacts under $GitRoot
-$ExcludeGitRoot            = $true
+$ExcludeGitRoot            = $false  # broad; excludes all source and non-build files beneath $GitRoot
 
 # Optional aggressive process exclusions
 $ExcludeGitProcess         = $false

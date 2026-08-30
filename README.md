@@ -5,23 +5,48 @@
 
 # Soenneker.Scripts.Dev
 
-Development bootstrap scripts used by Codex and CI-style Linux environments.
+Development-machine maintenance, setup, test, and diagnostics scripts used in Soenneker repositories.
 
-## What it provides
+These files modify machine state and are intended to be reviewed and run directly. Several contain configuration switches near the top; set those for your machine before execution.
 
-- `src/Codex.txt` installs the .NET 10 SDK into the current user's `~/.dotnet` directory without configuring an apt package feed.
-- It updates the current process immediately, persists `DOTNET_ROOT` and `PATH` through `/etc/profile.d/dotnet.sh`, and can run a temporary xUnit project to verify the installation.
+## Included scripts
 
-## Included files
+| File | Purpose | Important behavior |
+| --- | --- | --- |
+| `EnvironmentSetup.ps1` | Updates .NET workloads and installs `wasm-tools`. | Requires an installed `dotnet` CLI and may download or replace workload packs. |
+| `CleanEnvironment.ps1` | Cleans repository artifacts and Windows development-tool caches. | Defaults to `C:\git`, stops multiple IDE/build processes, clears NuGet/workload caches, and recursively deletes configured artifacts. Review every `$Wipe*`, `$Stop*`, and `$GitRoot` setting first. |
+| `DefenderExclusions.ps1` | Adds Microsoft Defender exclusions for selected development tools and transient build paths. | Must run as Administrator. Exclusions reduce malware scanning; broad repository and process exclusions are opt-in settings. |
+| `DeleteLogs.ps1` | Deletes `.log` files below a supplied path. | Defaults to `C:\git` with recursion enabled and permanently removes matching files. |
+| `KillAllDotnet.ps1` | Force-terminates processes whose names begin with `dotnet`. | Can interrupt builds, tests, servers, and unrelated .NET applications. |
+| `RunBradixPlaywrightTest.ps1` | Builds and launches the Bradix Playwright test executable with method, class, or query filtering. | Assumes the repository layout beneath `C:\git\Soenneker`; it can terminate stale Bradix test/demo process trees unless `-SkipCleanup` is supplied. |
+| `dotMemoryLinux.sh` | Installs prerequisites and downloads the pinned JetBrains dotMemory console distribution in a Linux container. | Uses `apt-get` or `apk`, writes beneath the current directory and `/home/site/dotmemory`, and is configured to inspect PID 1. The attach command is left commented for deliberate execution. |
 
-- `src/Codex.txt` — a Bash bootstrap script stored with a `.txt` extension so it can be copied into automation tasks.
+## Examples
 
-## How to use it
+Install the WebAssembly workload:
 
-Review the configuration variables at the top of `src/Codex.txt`, especially `DOTNET_CHANNEL`, `DOTNET_QUALITY`, and `RUN_DOTNET_TEST`. Copy it into your automation or execute it with Bash after reviewing it.
+```powershell
+pwsh -File .\src\EnvironmentSetup.ps1
+```
 
-## Important behavior
+Delete logs from one specific repository without recursion:
 
-- The script uses `sudo apt-get` to install prerequisites and writes `/etc/profile.d/dotnet.sh`, so it needs elevated access.
-- The SDK is installed per user under `~/.dotnet`; it does not add Microsoft's apt repository.
-- With `RUN_DOTNET_TEST=true`, it creates and runs a temporary xUnit project, then removes the temporary directory.
+```powershell
+pwsh -File .\src\DeleteLogs.ps1 -Path C:\git\MyRepo -Recurse $false
+```
+
+Run one Bradix Playwright test method:
+
+```powershell
+pwsh -File .\src\RunBradixPlaywrightTest.ps1 -Method MyTestMethod -Build
+```
+
+Prepare dotMemory inside a Linux container:
+
+```bash
+bash ./src/dotMemoryLinux.sh
+```
+
+## Safety
+
+Do not invoke `CleanEnvironment.ps1`, `DeleteLogs.ps1`, `KillAllDotnet.ps1`, or `DefenderExclusions.ps1` blindly from shared automation. Their changes affect the workstation outside the repository and may be difficult to reverse. Use an elevated shell only for the operations that require it, and keep the broad or destructive options disabled unless you intentionally need them.
